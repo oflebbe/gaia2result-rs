@@ -1,7 +1,7 @@
-extern crate libflate;
+extern crate flate2;
 extern crate tar;
 
-use libflate::gzip::Decoder;
+use flate2::read::GzDecoder;
 use std::fs::File;
 use std::io::prelude::*;
 use std::time::Duration;
@@ -13,8 +13,8 @@ use std::io::Read;
 use tar::Archive;
 
 use serde::Deserialize;
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::SyncSender;
 use std::sync::mpsc::Receiver;
 
 use tar::EntryType;
@@ -35,8 +35,8 @@ struct Result {
     z: f32,
 }
 
-fn handle_file(sender: Sender<Vec<Result>>, buffer: Vec<u8>)  {
-    let decoder = Decoder::new(buffer.as_slice()).unwrap();
+fn handle_file(sender: SyncSender<Vec<Result>>, buffer: Vec<u8>)  {
+    let decoder = GzDecoder::new(buffer.as_slice());
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .delimiter(b',')
@@ -83,20 +83,35 @@ fn receive( recv : Receiver<Vec<Result>>) {
         if let Err(y) = res {
             panic!("{}", y);
         }
+        println!("{} files {} stars", num, count);
     }
     drop( file);
-    println!("{} files {} stars", num, count);
+}
+
+fn workScheduler( recv : Receiver<tar::Entry<std::fs::File>>) {
+    let (sender, receiver) = sync_channel(10);
+
+    let pool = threadpool::Builder::new().build();
+    pool.execute( move || receive( receiver));
+    for f in recv.iter() {
+        let mut buffer = Vec::new();
+        // read the whole file
+        f.read_to_end(&mut buffer).unwrap();
+       
+        let sender_thread = sender.clone();
+        pool.execute(move || handle_file(sender_thread, buffer));
+    }
+    drop(sender);
 }
 
 
 fn handle_tar(filename: &str) {
     let file = File::open(filename).unwrap();
     let mut archive = Archive::new(file);
-
+   
+    let (workSender, workReceiver) = sync_channel(10);
     let pool = threadpool::Builder::new().build();
-    let (sender, receiver) = channel();
-
-    pool.execute( move || receive( receiver));
+    pool.execute( move || workScheduler( workReceiver));
 
     for file in archive.entries().unwrap() {
         let mut f = match file {
@@ -107,19 +122,13 @@ fn handle_tar(filename: &str) {
         if f.header().entry_type() != EntryType::Regular {
             continue;
         }
-        let mut buffer = Vec::new();
-        // read the whole file
-        f.read_to_end(&mut buffer).unwrap();
-       
-        let sender_thread = sender.clone();
-        pool.execute(move || handle_file(sender_thread, buffer));
+        
+        let res = workSender.send(f);
+        
     }
-    drop(sender);
+    drop(workSender);
     while pool.active_count() > 0 {
-        println!("{}", pool.active_count());
-        let ten_millis = Duration::from_millis(100);
-
-
+        let ten_millis = Duration::from_millis(50);
         thread::sleep(ten_millis);
     }
     
