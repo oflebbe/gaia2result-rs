@@ -4,8 +4,6 @@ extern crate tar;
 use flate2::read::GzDecoder;
 use std::fs::File;
 use std::io::prelude::*;
-use std::time::Duration;
-use std::thread;
 use std::mem;
 use std::slice;
 
@@ -13,12 +11,7 @@ use std::io::Read;
 use tar::Archive;
 
 use serde::Deserialize;
-use std::sync::mpsc::sync_channel;
-use std::sync::mpsc::SyncSender;
-use std::sync::mpsc::Receiver;
-
 use tar::EntryType;
-use threadpool::ThreadPool;
 
 
 #[derive(Debug, Deserialize)]
@@ -35,7 +28,7 @@ struct Result {
     z: f32,
 }
 
-fn handle_file(sender: SyncSender<Vec<Result>>, buffer: Vec<u8>)  {
+fn handle_file( buffer: Vec<u8>) -> Vec<Result> {
     let decoder = GzDecoder::new(buffer.as_slice());
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
@@ -61,79 +54,43 @@ fn handle_file(sender: SyncSender<Vec<Result>>, buffer: Vec<u8>)  {
         let rr = Result{ x: x, y: y, z: z};
         buffer.push( rr);
     }
-    let res = sender.send(buffer);
-    if let Err(x) = res {
-        panic!("{}", x);
-    }
+   
+    buffer
 }
 
-fn receive( recv : Receiver<Vec<Result>>) {
-    let mut file = File::create("result.dat").unwrap();
-    let mut count = 0;
-    let mut num = 0;
-    for r in recv.iter() {
-        count += r.len();
-        num += 1;
-        let p: *const [Result] = r.as_slice();
-        let p: *const u8 = p as *const u8;  // convert between pointer types
-        let bytes: &[u8] = unsafe {
-            slice::from_raw_parts(p, mem::size_of::<Result>()*r.len())
-        };
-        let res = file.write_all( bytes);
-        if let Err(y) = res {
-            panic!("{}", y);
-        }
-        println!("{} files {} stars", num, count);
+fn writer( fs : std::fs::File, res : Vec<Result>) -> std::fs::File {
+    
+    let mut fs = fs;
+    let count = res.len();
+
+    let p: *const [Result] = res.as_slice();
+    let p: *const u8 = p as *const u8;  // convert between pointer types
+    let bytes: &[u8] = unsafe {
+        slice::from_raw_parts(p, mem::size_of::<Result>()*count)
+    };
+    let res = fs.write_all( bytes);
+    if let Err(y) = res {
+        panic!("{}", y);
     }
-    drop( file);
+    fs
 }
-
-fn workScheduler( recv : Receiver<tar::Entry<std::fs::File>>) {
-    let (sender, receiver) = sync_channel(10);
-
-    let pool = threadpool::Builder::new().build();
-    pool.execute( move || receive( receiver));
-    for f in recv.iter() {
-        let mut buffer = Vec::new();
-        // read the whole file
-        f.read_to_end(&mut buffer).unwrap();
-       
-        let sender_thread = sender.clone();
-        pool.execute(move || handle_file(sender_thread, buffer));
-    }
-    drop(sender);
-}
-
 
 fn handle_tar(filename: &str) {
     let file = File::open(filename).unwrap();
     let mut archive = Archive::new(file);
-   
-    let (workSender, workReceiver) = sync_channel(10);
-    let pool = threadpool::Builder::new().build();
-    pool.execute( move || workScheduler( workReceiver));
 
-    for file in archive.entries().unwrap() {
-        let mut f = match file {
-            Ok(x) => x,
-            Err(y) => { println!("Ignore {:?}\n", y); continue }
-        };
-
-        if f.header().entry_type() != EntryType::Regular {
-            continue;
-        }
-        
-        let res = workSender.send(f);
-        
-    }
-    drop(workSender);
-    while pool.active_count() > 0 {
-        let ten_millis = Duration::from_millis(50);
-        thread::sleep(ten_millis);
-    }
-    
-    
-
+    let output_file = File::create("result.dat").unwrap();
+    let file = archive.entries().unwrap().into_iter().filter_map( |file| file.ok()).
+    filter(|file| file.header().entry_type() == EntryType::Regular ).
+    map( |file| {
+        let mut buffer = Vec::new();
+        let mut file = file;
+        // read the whole file
+        file.read_to_end(&mut buffer).unwrap();
+        buffer}
+    ).map( |byte_buf| handle_file(byte_buf)).
+    fold( output_file, |fs, buffer| writer(fs, buffer) );
+    drop(file);
 }
 
 fn main() {
