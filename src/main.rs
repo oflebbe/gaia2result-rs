@@ -19,6 +19,7 @@ use rayon::prelude::ParallelIterator;
 
 //use crossbeam_channel::bounded;
 use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::Receiver;
 #[derive(Debug, Deserialize)]
 struct Record {
     ra: f32,
@@ -59,25 +60,26 @@ fn handle_file( buffer: Vec<u8>) -> Vec<Result> {
         let rr = Result{ x: x, y: y, z: z};
         buffer.push( rr);
     }
-   
     buffer
 }
 
-fn writer( fs : std::fs::File, res : Vec<Result>) -> std::fs::File {
+fn writer( rcv: Receiver< Vec<Result>>) -> usize {
     
-    let mut fs = fs;
-    let count = res.len();
-
-    let p: *const [Result] = res.as_slice();
-    let p: *const u8 = p as *const u8;  // convert between pointer types
-    let bytes: &[u8] = unsafe {
-        slice::from_raw_parts(p, mem::size_of::<Result>()*count)
-    };
-    let res = fs.write_all( bytes);
-    if let Err(y) = res {
-        panic!("{}", y);
+    let mut fs = File::create("result.dat").unwrap();
+    let mut count = 0;
+    for res in rcv {
+        count += 1;
+        let p: *const [Result] = res.as_slice();
+        let p: *const u8 = p as *const u8;  // convert between pointer types
+        let bytes: &[u8] = unsafe {
+            slice::from_raw_parts(p, mem::size_of::<Result>()*count)
+        };
+        let res = fs.write_all( bytes);
+        if let Err(y) = res {
+            panic!("{}", y);
+        }
     }
-    fs
+    count
 }
 
 fn handle_tar(filename: &str) {
@@ -85,28 +87,36 @@ fn handle_tar(filename: &str) {
     let mut archive = Archive::new(file);
 
     
-    let (s, r ) = sync_channel(5);
-    
-    let output_file = File::create("result.dat").unwrap();
-    let c = r.into_iter().par_brige().
-    for_each(  | buffer| print!("1"));
+    let (s1, r1 ) = sync_channel::<Vec<u8>>(5);
+    let (s2, r2 ) = sync_channel::<Vec<Result>>(5);
 
-    /*let c = r.into_iter().par_brige().map( |byte_buf| handle_file(byte_buf.to_vec())).
-    for_each(  | buffer| writer( output_file, buffer) );*/
+    // heavy lifting here
+    let mut count = 0;
+    rayon::scope( |s| {
+        s.spawn( |_| {
+         r1.into_iter().par_bridge().map( |byte_buf| handle_file(byte_buf.to_vec())).
+            for_each(  | buffer| s2.send(buffer).unwrap() );
+         drop(s2);
+        });
 
-    
-    let v = archive.entries().unwrap().into_iter().filter_map( |file| file.ok()).
-    filter(|file| file.header().entry_type() == EntryType::Regular ).
-    fold( s, |s,  file| {
-        let mut buffer = Vec::new();
-        let mut file = file;
-        // read the whole file
-        file.read_to_end(&mut buffer).unwrap();
-        s.send(buffer).unwrap();
-        s });
-        print!("huhu");
-    
+         s.spawn( |_| {  count = writer( r2)});
+
+        s.spawn( |_|  {
+            archive.entries().unwrap().into_iter().filter_map( |file| file.ok()).
+                filter(|file| file.header().entry_type() == EntryType::Regular ).
+            for_each( |file| {
+                let mut buffer = Vec::new();
+                let mut file = file;
+                // read the whole file
+                file.read_to_end(&mut buffer).unwrap();
+                s1.send(buffer).unwrap();
+            });
+            drop(s1);
+        }
+        );
+    });
 }
+
 
 fn main() {
     handle_tar("gaia.tar")
