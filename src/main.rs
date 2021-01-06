@@ -1,5 +1,6 @@
 extern crate flate2;
 extern crate tar;
+extern crate rayon;
 
 use flate2::read::GzDecoder;
 use std::fs::File;
@@ -13,7 +14,11 @@ use tar::Archive;
 use serde::Deserialize;
 use tar::EntryType;
 
+use rayon::iter::ParallelBridge;
+use rayon::prelude::ParallelIterator;
 
+//use crossbeam_channel::bounded;
+use std::sync::mpsc::sync_channel;
 #[derive(Debug, Deserialize)]
 struct Record {
     ra: f32,
@@ -79,18 +84,28 @@ fn handle_tar(filename: &str) {
     let file = File::open(filename).unwrap();
     let mut archive = Archive::new(file);
 
+    
+    let (s, r ) = sync_channel(5);
+    
     let output_file = File::create("result.dat").unwrap();
-    let file = archive.entries().unwrap().into_iter().filter_map( |file| file.ok()).
+    let c = r.into_iter().par_brige().
+    for_each(  | buffer| print!("1"));
+
+    /*let c = r.into_iter().par_brige().map( |byte_buf| handle_file(byte_buf.to_vec())).
+    for_each(  | buffer| writer( output_file, buffer) );*/
+
+    
+    let v = archive.entries().unwrap().into_iter().filter_map( |file| file.ok()).
     filter(|file| file.header().entry_type() == EntryType::Regular ).
-    map( |file| {
+    fold( s, |s,  file| {
         let mut buffer = Vec::new();
         let mut file = file;
         // read the whole file
         file.read_to_end(&mut buffer).unwrap();
-        buffer}
-    ).map( |byte_buf| handle_file(byte_buf)).
-    fold( output_file, |fs, buffer| writer(fs, buffer) );
-    drop(file);
+        s.send(buffer).unwrap();
+        s });
+        print!("huhu");
+    
 }
 
 fn main() {
