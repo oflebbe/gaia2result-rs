@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 tar = "0.4"
-flate2 = { version = "1.0.19", features = ["zlib"], default-features = false }
+flate2 = "1.0" # { version = "1.0.19", features = ["zlib-ng-compat"], default-features = false }
 csv = "1.1"
 serde = { version = "1", features = ["derive"] }
 rayon = "1.5"

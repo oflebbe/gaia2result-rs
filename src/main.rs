@@ -17,9 +17,9 @@ use tar::EntryType;
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
 
-//use crossbeam_channel::bounded;
-use std::sync::mpsc::sync_channel;
-use std::sync::mpsc::Receiver;
+use crossbeam_channel::bounded;
+use crossbeam_channel::unbounded;
+use crossbeam_channel::Receiver;
 #[derive(Debug, Deserialize)]
 struct Record {
     ra: f32,
@@ -69,10 +69,11 @@ fn writer( rcv: Receiver< Vec<Result>>) -> usize {
     let mut count = 0;
     for res in rcv {
         count += 1;
+        let stars = res.len();
         let p: *const [Result] = res.as_slice();
         let p: *const u8 = p as *const u8;  // convert between pointer types
         let bytes: &[u8] = unsafe {
-            slice::from_raw_parts(p, mem::size_of::<Result>()*count)
+            slice::from_raw_parts(p, mem::size_of::<Result>()*stars)
         };
         let res = fs.write_all( bytes);
         if let Err(y) = res {
@@ -87,19 +88,19 @@ fn handle_tar(filename: &str) {
     let mut archive = Archive::new(file);
 
     
-    let (s1, r1 ) = sync_channel::<Vec<u8>>(5);
-    let (s2, r2 ) = sync_channel::<Vec<Result>>(5);
+    let (s1, r1 ) = bounded::<Vec<u8>>(3);
+    let (s2, r2 ) = unbounded::<Vec<Result>>();
 
     // heavy lifting here
     let mut count = 0;
     rayon::scope( |s| {
         s.spawn( |_| {
          r1.into_iter().par_bridge().map( |byte_buf| handle_file(byte_buf.to_vec())).
-            for_each(  | buffer| s2.send(buffer).unwrap() );
+            for_each( | buffer| s2.send(buffer).unwrap() );
          drop(s2);
         });
 
-         s.spawn( |_| {  count = writer( r2)});
+        s.spawn( |_| {  count = writer( r2)});
 
         s.spawn( |_|  {
             archive.entries().unwrap().into_iter().filter_map( |file| file.ok()).
