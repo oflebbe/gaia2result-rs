@@ -8,11 +8,12 @@ edition = "2018"
 
 [dependencies]
 tar = "0.4"
-flate2 = "1.0" # { version = "1.0.19", features = ["zlib-ng-compat"], default-features = false }
+flate2 = { version = "1.0.19", features = ["zlib-ng-compat"], default-features = false }
 csv = "1.1"
 serde = { version = "1", features = ["derive"] }
-rayon = "1.5"
+num_cpus = "1.0"
 crossbeam-channel = "0.5"
 
-[profile.release]
-debug = true
+# For profiling on mac
+#[profile.release]
+#debug = true

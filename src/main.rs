@@ -1,6 +1,6 @@
 extern crate flate2;
 extern crate tar;
-extern crate rayon;
+extern crate num_cpus;
 
 use flate2::read::GzDecoder;
 use std::fs::File;
@@ -10,15 +10,12 @@ use std::slice;
 
 use std::io::Read;
 use tar::Archive;
+use std::time::Instant;
 
 use serde::Deserialize;
 use tar::EntryType;
 
-use rayon::iter::ParallelBridge;
-use rayon::prelude::ParallelIterator;
-
 use crossbeam_channel::bounded;
-use crossbeam_channel::unbounded;
 use crossbeam_channel::Receiver;
 #[derive(Debug, Deserialize)]
 struct Record {
@@ -47,7 +44,7 @@ fn handle_file( buffer: Vec<u8>) -> Vec<Result> {
             Ok(x) => x,
             Err(_) => continue,
         };
-        if r.parallax < 0.0 {
+        if r.parallax <= 0.0 {
             continue;
         }
         // println!("{:?}", r);
@@ -63,13 +60,16 @@ fn handle_file( buffer: Vec<u8>) -> Vec<Result> {
     buffer
 }
 
-fn writer( rcv: Receiver< Vec<Result>>) -> usize {
+fn writer( rcv: Receiver< Vec<Result>>, num_files: usize) -> (usize, usize) {
     
     let mut fs = File::create("result.dat").unwrap();
-    let mut count = 0;
+    let mut count : usize  = 0;
+    let mut num_stars = 0;
+    let start = Instant::now();
     for res in rcv {
         count += 1;
         let stars = res.len();
+        num_stars += stars;
         let p: *const [Result] = res.as_slice();
         let p: *const u8 = p as *const u8;  // convert between pointer types
         let bytes: &[u8] = unsafe {
@@ -79,43 +79,54 @@ fn writer( rcv: Receiver< Vec<Result>>) -> usize {
         if let Err(y) = res {
             panic!("{}", y);
         }
+        let progress = start.elapsed().as_secs_f64();
+        let remaining = (progress / (count as f64 )) * (num_files as f64 - count as f64);
+        println!("{}/{} : remaing {} min :{} stars", count, num_files, remaining/ 60.0, num_stars);
     }
-    count
+    (count, num_stars)
+}
+
+fn count_tar( filename: &str) -> usize {
+    let file = File::open(filename).unwrap();
+    let mut archive = Archive::new(file);
+    archive.entries().unwrap().into_iter().filter_map( |file| file.ok()).
+    filter(|file| file.header().entry_type() == EntryType::Regular).count()
 }
 
 fn handle_tar(filename: &str) {
+    let num_files = 61242 ; //= count_tar( filename); Workaround for being too slow
     let file = File::open(filename).unwrap();
     let mut archive = Archive::new(file);
 
     
-    let (s1, r1 ) = bounded::<Vec<u8>>(3);
-    let (s2, r2 ) = unbounded::<Vec<Result>>();
+    let (s1, r1 ) = bounded::<Vec<u8>>(0);
+    let (s2, r2 ) = bounded::<Vec<Result>>(0);
 
-    // heavy lifting here
-    let mut count = 0;
-    rayon::scope( |s| {
-        s.spawn( |_| {
-         r1.into_iter().par_bridge().map( |byte_buf| handle_file(byte_buf.to_vec())).
-            for_each( | buffer| s2.send(buffer).unwrap() );
-         drop(s2);
+    // Iterate over tar file
+    std::thread::spawn( move || {
+        archive.entries().unwrap().into_iter().filter_map( |file| file.ok()).
+        filter(|file| file.header().entry_type() == EntryType::Regular ).
+        for_each( |file| {
+            let mut buffer = Vec::new();
+            let mut file = file;
+            // read the whole file
+            file.read_to_end(&mut buffer).unwrap();
+            s1.send(buffer).unwrap();
         });
-
-        s.spawn( |_| {  count = writer( r2)});
-
-        s.spawn( |_|  {
-            archive.entries().unwrap().into_iter().filter_map( |file| file.ok()).
-                filter(|file| file.header().entry_type() == EntryType::Regular ).
-            for_each( |file| {
-                let mut buffer = Vec::new();
-                let mut file = file;
-                // read the whole file
-                file.read_to_end(&mut buffer).unwrap();
-                s1.send(buffer).unwrap();
-            });
-            drop(s1);
-        }
-        );
     });
+    for _ in 0..num_cpus::get() {
+        let receiver = r1.clone();  // clone for this thread
+        let sender = s2.clone();
+        std::thread::spawn(move || {
+            receiver.into_iter().map( |byte_buf| handle_file(byte_buf.to_vec())).
+               for_each( |buffer| sender.send(buffer).unwrap());
+            }
+        );
+    }
+    drop(s2);
+
+    let (count, stars) = writer( r2, num_files);
+    println!("{} {}", count, stars);
 }
 
 
